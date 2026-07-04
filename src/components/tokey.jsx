@@ -1,6 +1,16 @@
 import logo from "./logo.png";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DEFAULT_USERS, findMatchingUser } from "../auth";
+import app, {
+  db,
+  collection,
+  getDocs,
+  doc,
+  setDoc,
+  deleteDoc,
+  onSnapshot,
+  enableIndexedDbPersistence,
+} from "../firebase";
 
 // ============================================================
 // BRAND COLORS from TOKEY MIGHTY WORKS logo
@@ -41,19 +51,17 @@ function clearFBConfig() {
 }
 
 // ============================================================
-// FIREBASE SDK LOADER (dynamic import from CDN)
+// FIREBASE SDK LOADER
 // ============================================================
 let _fb = null; // { app, db } once loaded
 
 async function loadFirebase(config) {
   if (_fb) return _fb;
-  const { initializeApp, getApps } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-  const { getFirestore, collection, getDocs, doc, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence }
-    = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
 
-  const existing = getApps();
-  const app = existing.length ? existing[0] : initializeApp(config);
-  const db = getFirestore(app);
+  const activeConfig = config || getFBConfig();
+  if (!activeConfig) {
+    return null;
+  }
 
   try {
     await enableIndexedDbPersistence(db);
