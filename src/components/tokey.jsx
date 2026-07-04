@@ -115,6 +115,7 @@ async function dbDel(store, id) {
   });
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const makeInvoiceNo = () => `INV-${new Date().getFullYear()}-${Date.now().toString().slice(-5)}`;
 
 // ============================================================
 // FIREBASE SYNC HELPERS
@@ -154,7 +155,6 @@ async function fbGetAll(store) {
 // ============================================================
 const mkSeed = () => {
   const now = new Date();
-  const past = (d) => { const x = new Date(now); x.setDate(x.getDate()-d); return x.toISOString(); };
   return {
     users: [
       { id:"u1", name:"Owner", username:"TMWORKS", password:"tmworks@123", role:"superadmin", active:true, createdAt:now.toISOString() },
@@ -352,7 +352,8 @@ function useStore() {
     }
   }, []);
 
-  useEffect(() => { load(); return () => unsubRefs.current.forEach(u => u()); }, [load]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load(); const subs = unsubRefs.current; return () => subs.forEach(u => u()); }, [load]);
 
   // Write to local + Firebase
   const update = useCallback(async (store, item) => {
@@ -510,7 +511,7 @@ const Btn = ({ children,onClick,v="primary",sm,icon,disabled,full,style:ext }) =
     secondary: { background:B.gray,color:B.text,border:`1px solid ${B.border}` },
   };
   return (
-    <button onClick={onClick} disabled={disabled} style={{ ...vs[v],padding:sm?"6px 13px":"9px 20px",borderRadius:9,fontSize:sm?12:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",display:"inline-flex",alignItems:"center",gap:6,opacity:disabled?.6:1,transition:"opacity .15s,transform .1s",width:full?"100%":"auto",justifyContent:full?"center":"flex-start",...ext }}
+    <button onClick={onClick} disabled={disabled} style={{ ...vs[v],padding:sm?"6px 13px":"9px 20px",borderRadius:9,fontSize:sm?12:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer",display:"inline-flex",alignItems:"center",gap:6,opacity:disabled?0.6:1,transition:"opacity .15s,transform .1s",width:full?"100%":"auto",justifyContent:full?"center":"flex-start",...ext }}
       onMouseEnter={e=>{if(!disabled)e.currentTarget.style.transform="translateY(-1px)"}}
       onMouseLeave={e=>{e.currentTarget.style.transform="none"}}>
       {icon&&<SVG name={icon} size={sm?13:15}/>}
@@ -582,7 +583,6 @@ const SVG = ({ name,size=18 }) => {
     cloudDown:"M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10",
     key:"M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z",
     sync:"M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15",
-    cloud:"M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z",
     cloud_up:"M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12",
     settings:"M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
   };
@@ -689,13 +689,12 @@ function LoginPage({ onLogin,state }) {
 // ============================================================
 // DASHBOARD
 // ============================================================
-function Dashboard({ state, cu }) {
+function Dashboard({ state }) {
   const today = new Date().toDateString();
   const todaySales = state.sales.filter(s=>new Date(s.createdAt).toDateString()===today);
   const todayJobs = state.serviceJobs.filter(j=>new Date(j.createdAt).toDateString()===today);
   const allSalesRev = state.sales.reduce((a,s)=>a+s.total,0);
   const allSvcRev = state.serviceJobs.reduce((a,j)=>a+j.total,0);
-  const allProfit = state.sales.reduce((a,s)=>a+(s.profit||0),0);
   const lowStock = state.products.filter(p=>p.stock<=p.minStock);
   const todayRev = todaySales.reduce((a,s)=>a+s.total,0)+todayJobs.reduce((a,j)=>a+j.total,0);
 
@@ -959,7 +958,7 @@ function SalesPage({state,update,remove,cu,audit,toast}){
       {view==="new"
         ? <NewSaleForm state={state} update={update} cu={cu} audit={audit} toast={toast} onDone={s=>{setViewSale(s);setView("list");}}/>
         : viewSale
-          ? <InvoiceView sale={viewSale} onClose={()=>setViewSale(null)} canDelete={canDeleteSale} onDelete={()=>deleteSale(viewSale)}/>
+          ? <InvoiceView sale={viewSale} onClose={()=>setViewSale(null)} canDelete={canDeleteSale} canProcessRefund={canProcessRefund} onDelete={()=>deleteSale(viewSale)}/>
           : <>
               <div style={{ position:"relative",marginBottom:16 }}>
                 <span style={{ position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:B.muted }}><SVG name="search" size={16}/></span>
@@ -1022,7 +1021,7 @@ function NewSaleForm({state,update,cu,audit,toast,onDone}){
       await update("products",{...p,stock:p.stock-+item.qty});
       await update("stockMovements",{id:uid(),productId:p.id,productName:p.name,type:"out",qty:+item.qty,reason:"Sale",before:p.stock,after:p.stock-+item.qty,createdAt:new Date().toISOString(),createdBy:cu.name});
     }
-    const sale={id:uid(),invoiceNo:`INV-${new Date().getFullYear()}-${Date.now().toString().slice(-5)}`,customerId:custId,customerName:custName,items,subtotal,discount:+disc,total,profit,notes,status:"paid",createdAt:new Date().toISOString(),createdBy:cu.id,createdByName:cu.name};
+    const sale={id:uid(),invoiceNo: makeInvoiceNo(),customerId:custId,customerName:custName,items,subtotal,discount:+disc,total,profit,notes,status:"paid",createdAt:new Date().toISOString(),createdBy:cu.id,createdByName:cu.name};
     await update("sales",sale);
     await audit("New Sale",`${sale.invoiceNo} — ${php(total)}`,cu);
     toast(`Invoice ${sale.invoiceNo} created!`);
@@ -1082,7 +1081,7 @@ function NewSaleForm({state,update,cu,audit,toast,onDone}){
   );
 }
 
-function InvoiceView({sale,onClose,canDelete,onDelete}){
+function InvoiceView({sale,onClose,canDelete,canProcessRefund,onDelete}){
   const print=()=>{
     const w=window.open("","_blank");
     w.document.write(`<html><head><title>Invoice ${sale.invoiceNo}</title><style>
@@ -1442,7 +1441,7 @@ function ServiceCatalogPage({state,update,remove,cu,audit,toast}){
 // ============================================================
 // REPORTS
 // ============================================================
-function ReportsPage({state,cu}){
+function ReportsPage({state,toast}){
   const [period,setPeriod]=useState("month");
   const now=new Date();
   const flt=items=>items.filter(item=>{
@@ -1535,7 +1534,7 @@ function ReportsPage({state,cu}){
 // ============================================================
 // USERS PAGE
 // ============================================================
-function UsersPage({state,update,remove,cu,audit,toast}){
+function UsersPage({state,update,cu,audit,toast}){
   const [modal,setModal]=useState(null);
   const [form,setForm]=useState({});
 
@@ -1560,6 +1559,17 @@ function UsersPage({state,update,remove,cu,audit,toast}){
     toast(`User ${u.active?"suspended":"activated"}`);
   };
 
+  const deleteUser=async u=>{
+    if(u.id===cu.id){
+      toast("You cannot delete your own account","error");
+      return;
+    }
+    if(!window.confirm(`Delete user ${u.name}? This action cannot be undone.`)) return;
+    await remove("users",u.id);
+    await audit("Delete User",u.name,cu);
+    toast("User deleted successfully");
+  };
+
   const roleColor={superadmin:B.purple,admin:B.cyan,staff:B.lime};
   return(
     <div>
@@ -1580,6 +1590,7 @@ function UsersPage({state,update,remove,cu,audit,toast}){
             <div style={{ display:"flex",gap:5 }}>
               <Btn sm v="secondary" icon="edit" onClick={()=>{setForm({...r,password:""});setModal("form");}}/>
               {r.id!==cu.id&&<Btn sm v={r.active?"secondary":"lime"} onClick={()=>suspend(r)}>{r.active?"Suspend":"Activate"}</Btn>}
+              {can(cu,"all") && r.id!==cu.id && <Btn sm v="danger" icon="trash" onClick={()=>deleteUser(r)}>Delete</Btn>}
             </div>
           )}
         />
