@@ -1534,7 +1534,7 @@ function ReportsPage({state,toast}){
 // ============================================================
 // USERS PAGE
 // ============================================================
-function UsersPage({state,update,cu,audit,toast}){
+function UsersPage({state,update,remove,cu,audit,toast,reload}){
   const [modal,setModal]=useState(null);
   const [form,setForm]=useState({});
 
@@ -1544,13 +1544,18 @@ function UsersPage({state,update,cu,audit,toast}){
   const canCreateAdmin = can(cu,"all"); // only superadmin
   const save=async()=>{
     if(!form.name||!form.username){toast("Name and username required","error");return;}
+    const normalizedUsername = form.username.trim().toLowerCase();
+    const usernameTaken = state.users.some(u => u.username?.trim().toLowerCase() === normalizedUsername && u.id !== form.id);
+    if(usernameTaken){toast("That username is already taken","error");return;}
     if(!form.id&&!form.password){toast("Password required for new user","error");return;}
     if(!canCreateAdmin&&form.role==="admin"){toast("You cannot create Admin accounts","error");return;}
     if(!canCreateAdmin&&form.role==="superadmin"){toast("Unauthorized","error");return;}
-    const item={...form,id:form.id||uid(),active:form.active!==false,createdAt:form.createdAt||new Date().toISOString()};
+    const item={...form,id:form.id||uid(),username:normalizedUsername,active:form.active!==false,createdAt:form.createdAt||new Date().toISOString()};
     await update("users",item);
     await audit(form.id?"Edit User":"Add User",`${item.name} (${item.role})`,cu);
-    toast("User saved!"); setModal(null);
+    toast("User saved!");
+    setModal(null);
+    setForm({});
   };
 
   const suspend=async u=>{
@@ -1568,6 +1573,7 @@ function UsersPage({state,update,cu,audit,toast}){
     await remove("users",u.id);
     await audit("Delete User",u.name,cu);
     toast("User deleted successfully");
+    reload();
   };
 
   const roleColor={superadmin:B.purple,admin:B.cyan,staff:B.lime};
@@ -1590,7 +1596,7 @@ function UsersPage({state,update,cu,audit,toast}){
             <div style={{ display:"flex",gap:5 }}>
               <Btn sm v="secondary" icon="edit" onClick={()=>{setForm({...r,password:""});setModal("form");}}/>
               {r.id!==cu.id&&<Btn sm v={r.active?"secondary":"lime"} onClick={()=>suspend(r)}>{r.active?"Suspend":"Activate"}</Btn>}
-              {can(cu,"all") && r.id!==cu.id && <Btn sm v="danger" icon="trash" onClick={()=>deleteUser(r)}>Delete</Btn>}
+              {(can(cu,"manageStaff")||can(cu,"all")) && r.id!==cu.id && <Btn sm v="danger" icon="trash" onClick={()=>deleteUser(r)}>Delete</Btn>}
             </div>
           )}
         />
