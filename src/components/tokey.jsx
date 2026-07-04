@@ -914,7 +914,7 @@ function StockModal({product,onSave,onClose}){
 // ============================================================
 // SALES
 // ============================================================
-function SalesPage({state,update,cu,audit,toast}){
+function SalesPage({state,update,remove,cu,audit,toast}){
   const [view,setView]=useState("list");
   const [search,setSearch]=useState("");
   const [viewSale,setViewSale]=useState(null);
@@ -923,6 +923,25 @@ function SalesPage({state,update,cu,audit,toast}){
     s.invoiceNo?.toLowerCase().includes(search.toLowerCase())||
     s.customerName?.toLowerCase().includes(search.toLowerCase())
   );
+  const canDeleteSale = can(cu,"all");
+  const canProcessRefund = true;
+
+  const deleteSale=async(sale)=>{
+    if(!canDeleteSale){toast("Only the owner can delete sales.","error");return;}
+    if(!window.confirm(`Delete sale ${sale.invoiceNo}? This will restore inventory and remove the record.`)) return;
+    for(const item of sale.items||[]){
+      const p=state.products.find(x=>x.id===item.productId);
+      if(!p) continue;
+      const before=Number(p.stock||0);
+      const after=before+Number(item.qty||0);
+      await update("products",{...p,stock:after});
+      await update("stockMovements",{id:uid(),productId:p.id,productName:p.name,type:"in",qty:Number(item.qty||0),reason:"Sale deleted / refund",before,after,createdAt:new Date().toISOString(),createdBy:cu.name});
+    }
+    await remove("sales",sale.id);
+    await audit("Delete Sale",`${sale.invoiceNo} — stock restored`,cu);
+    toast("Sale deleted and inventory restored");
+    if(viewSale?.id===sale.id) setViewSale(null);
+  };
 
   return(
     <div>
@@ -932,7 +951,7 @@ function SalesPage({state,update,cu,audit,toast}){
       {view==="new"
         ? <NewSaleForm state={state} update={update} cu={cu} audit={audit} toast={toast} onDone={s=>{setViewSale(s);setView("list");}}/>
         : viewSale
-          ? <InvoiceView sale={viewSale} onClose={()=>setViewSale(null)}/>
+          ? <InvoiceView sale={viewSale} onClose={()=>setViewSale(null)} canDelete={canDeleteSale} onDelete={()=>deleteSale(viewSale)}/>
           : <>
               <div style={{ position:"relative",marginBottom:16 }}>
                 <span style={{ position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",color:B.muted }}><SVG name="search" size={16}/></span>
@@ -951,7 +970,11 @@ function SalesPage({state,update,cu,audit,toast}){
                     {k:"createdByName",l:"By"},
                   ]}
                   data={sales}
-                  actions={r=><Btn sm v="ghost" icon="invoice" onClick={()=>setViewSale(r)}>View</Btn>}
+                  actions={r=><div style={{ display:"flex", gap:6 }}>
+                    <Btn sm v="ghost" icon="invoice" onClick={()=>setViewSale(r)}>View</Btn>
+                    {canProcessRefund&&<Btn sm v="cyan" icon="check" onClick={()=>deleteSale(r)}>Return / Refund</Btn>}
+                    {canDeleteSale&&<Btn sm v="danger" icon="trash" onClick={()=>deleteSale(r)}>Delete</Btn>}
+                  </div>}
                 />
               </Card>
             </>
@@ -1051,7 +1074,7 @@ function NewSaleForm({state,update,cu,audit,toast,onDone}){
   );
 }
 
-function InvoiceView({sale,onClose}){
+function InvoiceView({sale,onClose,canDelete,onDelete}){
   const print=()=>{
     const w=window.open("","_blank");
     w.document.write(`<html><head><title>Invoice ${sale.invoiceNo}</title><style>
@@ -1086,8 +1109,10 @@ function InvoiceView({sale,onClose}){
           <h3 style={{ margin:0,fontSize:20,fontWeight:900,background:`linear-gradient(135deg,${B.purple},${B.cyan})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent" }}>{sale.invoiceNo}</h3>
           <p style={{ margin:"4px 0 0",fontSize:12,color:B.muted }}>{fmtDate(sale.createdAt)} · by {sale.createdByName}</p>
         </div>
-        <div style={{ display:"flex",gap:8 }}>
+        <div style={{ display:"flex",gap:8,flexWrap:"wrap" }}>
           <Btn sm icon="download" v="cyan" onClick={print}>Print / PDF</Btn>
+          {canProcessRefund&&<Btn sm v="cyan" icon="check" onClick={onDelete}>Return / Refund</Btn>}
+          {canDelete&&<Btn sm v="danger" icon="trash" onClick={onDelete}>Delete Sale</Btn>}
           <Btn sm v="secondary" onClick={onClose}>← Back</Btn>
         </div>
       </div>
