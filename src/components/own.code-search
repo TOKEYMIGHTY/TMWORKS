@@ -1,0 +1,9 @@
+# Query: own
+# ContextLines: 1
+
+3 results - 1 file
+
+src\components\tokey.jsx:
+  150      users: [
+  151:       { id:"u1", name:"TMWORKS", username:"TMWORKS", password:"tmworks@123", role:"superadmin", active:true, createdAt:now.toISOString() },
+  152        { id:"u2", name:"Manager Ana", username:"admin", password:"admin123", role:"admin", active:true, createdAt:now.toISOString() },
