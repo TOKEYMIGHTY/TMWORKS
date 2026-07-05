@@ -388,10 +388,17 @@ function useStore() {
   const update = useCallback(async (store, item) => {
     // Ensure timestamps for LWW conflict resolution
     const now = new Date().toISOString();
+    if (!item.id) item.id = uid();
     if (!item.createdAt) item.createdAt = now;
     item.updatedAt = now;
+    
     await dbPut(store, item);
-    setState(s => ({ ...s, [store]: s[store].find(x=>x.id===item.id) ? s[store].map(x=>x.id===item.id?item:x) : [...s[store], item] }));
+    setState(s => ({ 
+      ...s, 
+      [store]: s[store].find(x=>x.id===item.id) 
+        ? s[store].map(x=>x.id===item.id?item:x) 
+        : [...s[store], item] 
+    }));
     await fbPut(store, item);
   }, []);
 
@@ -409,11 +416,11 @@ function useStore() {
     await fbPut("auditLog", log);
   }, []);
 
-  return { state, update, remove, audit, reload:load, syncStatus };
+  return { state, update, remove, audit, reload:load, syncStatus, setState };
 }
 
 // ============================================================
-// FIREBASE SYNC ENGINE
+// FIREBASE SYNC ENGINE (IMPROVED)
 // ============================================================
 async function syncFromFirebase(localState, setState, setSyncStatus, unsubRefs) {
   const cfg = getFBConfig();
@@ -426,23 +433,39 @@ async function syncFromFirebase(localState, setState, setSyncStatus, unsubRefs) 
     unsubRefs.current.forEach(u => u());
     unsubRefs.current = [];
 
+    console.log("Starting Firebase sync from cloud...");
+    appendSyncLog("Starting full sync from cloud");
+
     // For each collection, pull from Firestore and merge into local + state
     await Promise.all(stores.map(async store => {
       const cloudData = await fbGetAll(store);
-      if (!cloudData) return;
+      if (!cloudData) {
+        console.warn(`fbGetAll returned null for ${store}`);
+        return;
+      }
+
+      console.log(`${store}: got ${cloudData.length} items from cloud`);
 
       // Merge cloud into local IndexedDB using LWW (updatedAt)
+      let mergedCount = 0;
       for (const item of cloudData) {
         try {
+          // Ensure cloud item has timestamps
+          if (!item.updatedAt) item.updatedAt = new Date().toISOString();
+          if (!item.createdAt) item.createdAt = item.updatedAt;
+          
           const local = await dbGet(store, item.id);
-          const localTs = local?.updatedAt;
+          const localTs = local?.updatedAt || local?.createdAt;
           const cloudTs = item?.updatedAt;
-          // Apply if cloud has no ts (assume authoritative) or cloud is newer
-          if (!localTs || !cloudTs || cloudTs >= localTs) {
+          
+          // Apply if cloud is newer or local doesn't exist
+          if (!local || !localTs || !cloudTs || cloudTs >= localTs) {
             await dbPut(store, item);
+            mergedCount++;
           }
         } catch(e) { console.warn(`db merge ${store}/${item.id} failed:`, e); }
       }
+      console.log(`${store}: merged ${mergedCount} items locally`);
 
       // Merge cloud items into state (LWW)
       setState(s => {
@@ -452,39 +475,63 @@ async function syncFromFirebase(localState, setState, setSyncStatus, unsubRefs) 
           const idx = merged.findIndex(x => x.id === ci.id);
           if (idx >= 0) {
             const localItem = merged[idx];
-            if (!localItem.updatedAt || !ci.updatedAt || ci.updatedAt >= localItem.updatedAt) merged[idx] = ci;
+            const localTs = localItem?.updatedAt || localItem?.createdAt;
+            const cloudTs = ci?.updatedAt;
+            if (!localTs || !cloudTs || cloudTs >= localTs) merged[idx] = ci;
           } else merged.push(ci);
         }
+        appendSyncLog(`${store}: merged ${merged.length} items into state`);
         return { ...s, [store]: merged };
       });
 
       // Set up real-time listener with safe merge
-      const unsub = onSnapshot(collection(db, store), snap => {
-        const items = snap.docs.map(d => d.data());
-        // For each item, apply if cloud is newer
-        items.forEach(async item => {
-          try {
-            const local = await dbGet(store, item.id);
-            const localTs = local?.updatedAt;
-            const cloudTs = item?.updatedAt;
-            if (!localTs || !cloudTs || cloudTs >= localTs) {
-              await dbPut(store, item);
-              setState(s => {
-                const cur = s[store] || [];
-                const idx = cur.findIndex(x => x.id === item.id);
-                if (idx >= 0) { cur[idx] = item; return { ...s, [store]: [...cur] }; }
-                return { ...s, [store]: [...cur, item] };
-              });
-            }
-          } catch(e) { console.warn(`Listener merge ${store}/${item.id} failed:`, e); }
-        });
-      }, err => console.warn(`Listener ${store}:`, err.message));
+      const unsub = onSnapshot(
+        collection(db, store),
+        snap => {
+          const items = snap.docs.map(d => d.data());
+          console.log(`Listener update for ${store}: ${items.length} items`);
+          
+          // For each item, apply if cloud is newer
+          items.forEach(async item => {
+            try {
+              if (!item.updatedAt) item.updatedAt = new Date().toISOString();
+              if (!item.createdAt) item.createdAt = item.updatedAt;
+              
+              const local = await dbGet(store, item.id);
+              const localTs = local?.updatedAt || local?.createdAt;
+              const cloudTs = item?.updatedAt;
+              
+              if (!local || !localTs || !cloudTs || cloudTs >= localTs) {
+                await dbPut(store, item);
+                setState(s => {
+                  const cur = s[store] || [];
+                  const idx = cur.findIndex(x => x.id === item.id);
+                  if (idx >= 0) { 
+                    cur[idx] = item;
+                    appendSyncLog(`Listener: updated ${store}/${item.id}`);
+                    return { ...s, [store]: [...cur] }; 
+                  }
+                  appendSyncLog(`Listener: added ${store}/${item.id}`);
+                  return { ...s, [store]: [...cur, item] };
+                });
+              }
+            } catch(e) { console.warn(`Listener merge ${store}/${item.id} failed:`, e); }
+          });
+        },
+        err => {
+          console.warn(`Listener ${store}:`, err.message);
+          appendSyncLog(`Listener error ${store}: ${err.message}`);
+        }
+      );
       unsubRefs.current.push(unsub);
     }));
 
+    console.log("Firebase sync complete");
+    appendSyncLog("Full sync from cloud complete");
     setSyncStatus("synced");
   } catch(e) {
     console.error("Firebase sync error:", e);
+    appendSyncLog(`Sync error: ${e.message}`);
     setSyncStatus("error");
   }
 }
@@ -492,9 +539,92 @@ async function syncFromFirebase(localState, setState, setSyncStatus, unsubRefs) 
 // Push ALL local data to Firebase (for first-time setup)
 async function pushLocalToFirebase(state) {
   const stores = ["products","sales","customers","services","serviceJobs","stockMovements","users","auditLog","settings","debtors","debtPayments","expenditures"];
+  console.log("Pushing all local data to Firebase...");
+  appendSyncLog("Starting push all local data");
+  
+  let pushed = 0;
   for (const store of stores) {
     const items = state[store] || [];
-    for (const item of items) await fbPut(store, item);
+    for (const item of items) {
+      // Ensure timestamps before push
+      if (!item.updatedAt) item.updatedAt = new Date().toISOString();
+      if (!item.createdAt) item.createdAt = item.updatedAt;
+      
+      await fbPut(store, item);
+      pushed++;
+    }
+  }
+  
+  console.log(`Pushed ${pushed} total items to Firebase`);
+  appendSyncLog(`Pushed ${pushed} items to Firebase`);
+}
+
+// Manual pull/sync trigger - explicitly pull all data from cloud
+async function manualSyncFromCloud(setState, setSyncStatus) {
+  console.log("Manual sync initiated by user");
+  appendSyncLog("Manual sync initiated");
+  setSyncStatus("syncing");
+  
+  const cfg = getFBConfig();
+  if (!cfg) {
+    console.warn("Firebase not configured");
+    setSyncStatus("idle");
+    return;
+  }
+
+  try {
+    const { db, collection } = await loadFirebase(cfg);
+    const stores = ["products","sales","customers","services","serviceJobs","stockMovements","users","auditLog","settings","debtors","debtPayments","expenditures"];
+    
+    let totalItems = 0;
+    
+    for (const store of stores) {
+      const cloudData = await fbGetAll(store);
+      if (!cloudData) continue;
+      
+      // Merge into local IndexedDB
+      for (const item of cloudData) {
+        if (!item.updatedAt) item.updatedAt = new Date().toISOString();
+        if (!item.createdAt) item.createdAt = item.updatedAt;
+        
+        try {
+          const local = await dbGet(store, item.id);
+          const localTs = local?.updatedAt || local?.createdAt;
+          const cloudTs = item?.updatedAt;
+          
+          if (!local || !localTs || !cloudTs || cloudTs >= localTs) {
+            await dbPut(store, item);
+          }
+        } catch(e) { console.warn(`Manual sync merge ${store}/${item.id}:`, e); }
+      }
+      
+      // Update state
+      setState(s => {
+        const local = s[store] || [];
+        const merged = [...local];
+        for (const ci of cloudData || []) {
+          const idx = merged.findIndex(x => x.id === ci.id);
+          if (idx >= 0) {
+            const localItem = merged[idx];
+            const localTs = localItem?.updatedAt || localItem?.createdAt;
+            const cloudTs = ci?.updatedAt;
+            if (!localTs || !cloudTs || cloudTs >= localTs) merged[idx] = ci;
+          } else merged.push(ci);
+        }
+        return { ...s, [store]: merged };
+      });
+      
+      totalItems += cloudData.length;
+      console.log(`Manual sync ${store}: ${cloudData.length} items`);
+    }
+    
+    console.log(`Manual sync complete: ${totalItems} total items`);
+    appendSyncLog(`Manual sync complete: pulled ${totalItems} items`);
+    setSyncStatus("synced");
+  } catch(e) {
+    console.error("Manual sync error:", e);
+    appendSyncLog(`Manual sync error: ${e.message}`);
+    setSyncStatus("error");
   }
 }
 
@@ -2065,12 +2195,13 @@ function ExpendituresPage({ state, update, remove, cu, audit, toast }) {
 // ============================================================
 // FIREBASE SETTINGS PAGE
 // ============================================================
-function FirebaseSettingsPage({ state, toast, reload, syncStatus }) {
+function FirebaseSettingsPage({ state, toast, reload, syncStatus, setState }) {
   const existing = getFBConfig();
   const [cfg, setCfg] = useState(existing ? JSON.stringify(existing, null, 2) : "");
   const [tab, setTab] = useState(existing ? "status" : "setup");
   const [pushing, setPushing] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const isConnected = !!existing;
 
   const saveConfig = async () => {
@@ -2104,6 +2235,16 @@ function FirebaseSettingsPage({ state, toast, reload, syncStatus }) {
       toast("✓ All local data pushed to Firebase!");
     } catch (e) { toast(`Push failed: ${e.message}`, "error"); }
     setPushing(false);
+  };
+
+  const pullFromCloud = async () => {
+    setSyncing(true);
+    try {
+      await manualSyncFromCloud(setState, () => {});
+      toast("✓ Latest data pulled from cloud!");
+      reload();
+    } catch (e) { toast(`Pull failed: ${e.message}`, "error"); }
+    setSyncing(false);
   };
 
   const disconnect = () => {
@@ -2142,11 +2283,15 @@ function FirebaseSettingsPage({ state, toast, reload, syncStatus }) {
               <Card>
                 <h3 style={{ margin:"0 0 14px", fontSize:14, fontWeight:800, color:B.dark }}>Sync Controls</h3>
                 <p style={{ fontSize:13, color:B.muted, marginBottom:16, lineHeight:1.6 }}>
-                  Use <strong>Push to Cloud</strong> to upload all local data to Firebase — useful when setting up a new device or recovering from a sync issue.
+                  <strong>Push to Cloud:</strong> Upload all local data to Firebase (overwrites cloud with local).<br/>
+                  <strong>Pull from Cloud:</strong> Download latest data from all devices and merge locally.
                 </p>
                 <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
                   <Btn icon="cloudUp" v="cyan" onClick={pushToCloud} disabled={pushing} full>{pushing?"Pushing…":"Push All Local Data to Cloud"}</Btn>
-                  <Btn icon="cloudDown" v="ghost" onClick={reload} full>Pull Latest from Cloud</Btn>
+                  <Btn icon="cloudDown" v="lime" onClick={pullFromCloud} disabled={syncing} full>{syncing?"Pulling…":"Pull Latest from Cloud (Force Sync)"}</Btn>
+                  <Btn icon="sync" v="ghost" onClick={reload} full>Reload App (Restart Sync)</Btn>
+                </div>
+                  <Btn icon="sync" v="ghost" onClick={reload} full>Reload App (Restart Sync)</Btn>
                 </div>
               </Card>
               <Card>
@@ -2602,7 +2747,7 @@ function getNav(cu){
 // APP ROOT
 // ============================================================
 export default function App(){
-  const {state,update,remove,audit,syncStatus,reload} = useStore();
+  const {state,update,remove,audit,syncStatus,reload,setState} = useStore();
   const [cu,setCu]=useState(null);
   const [page,setPage]=useState("dashboard");
   const [sidebar,setSidebar]=useState(true);
@@ -2638,7 +2783,7 @@ export default function App(){
       case "myperformance":  return <MyPerformancePage {...props}/>;
       case "users":          return <UsersPage {...props}/>;
       case "audit":          return <AuditPage {...props}/>;
-      case "firebase":       return <FirebaseSettingsPage {...props} syncStatus={syncStatus}/>;
+      case "firebase":       return <FirebaseSettingsPage {...props} syncStatus={syncStatus} setState={setState}/>;
       default:               return <Dashboard {...props}/>;
     }
   };
