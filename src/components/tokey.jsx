@@ -2291,8 +2291,6 @@ function FirebaseSettingsPage({ state, toast, reload, syncStatus, setState }) {
                   <Btn icon="cloudDown" v="lime" onClick={pullFromCloud} disabled={syncing} full>{syncing?"Pulling…":"Pull Latest from Cloud (Force Sync)"}</Btn>
                   <Btn icon="sync" v="ghost" onClick={reload} full>Reload App (Restart Sync)</Btn>
                 </div>
-                  <Btn icon="sync" v="ghost" onClick={reload} full>Reload App (Restart Sync)</Btn>
-                </div>
               </Card>
               <Card>
                 <h3 style={{ margin:"0 0 14px", fontSize:14, fontWeight:800, color:B.dark }}>Connection Info</h3>
