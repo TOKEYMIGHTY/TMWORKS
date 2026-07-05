@@ -50,6 +50,18 @@ function clearFBConfig() {
   localStorage.removeItem(FB_KEY);
 }
 
+// Lightweight sync log for debugging (keeps last 200 entries)
+const SYNC_LOG_KEY = "tmworks_sync_log";
+function appendSyncLog(entry) {
+  try {
+    const list = JSON.parse(localStorage.getItem(SYNC_LOG_KEY) || "[]");
+    list.push({ ts: new Date().toISOString(), entry });
+    while (list.length > 200) list.shift();
+    localStorage.setItem(SYNC_LOG_KEY, JSON.stringify(list));
+  } catch (e) { console.warn("appendSyncLog failed:", e); }
+}
+function readSyncLog() { try { return JSON.parse(localStorage.getItem(SYNC_LOG_KEY) || "[]"); } catch { return []; } }
+
 // ============================================================
 // FIREBASE SDK LOADER
 // ============================================================
@@ -114,6 +126,15 @@ async function dbDel(store, id) {
     r.onsuccess = () => res(); r.onerror = () => rej(r.error);
   });
 }
+async function dbGet(store, id) {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const t = db.transaction(store, "readonly");
+    const r = t.objectStore(store).get(id);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 const makeInvoiceNo = () => `INV-${new Date().getFullYear()}-${Date.now().toString().slice(-5)}`;
 
@@ -125,9 +146,14 @@ async function fbPut(store, item) {
   if (!cfg) return;
   try {
     const { db, doc, setDoc } = await loadFirebase(cfg);
+    // Ensure updatedAt exists for LWW merge
+    const now = new Date().toISOString();
+    if (!item.updatedAt) item.updatedAt = now;
     // Firestore doesn't allow undefined values — strip them
     const clean = JSON.parse(JSON.stringify(item));
-    await setDoc(doc(db, store, item.id), clean);
+    await setDoc(doc(db, store, item.id), clean, { merge: true });
+    console.info(`fbPut: ${store}/${item.id} @ ${item.updatedAt}`);
+    appendSyncLog(`fbPut OK: ${store}/${item.id} @ ${item.updatedAt}`);
   } catch (e) { console.warn("Firebase write failed:", e.message); }
 }
 
@@ -137,6 +163,7 @@ async function fbDel(store, id) {
   try {
     const { db, doc, deleteDoc } = await loadFirebase(cfg);
     await deleteDoc(doc(db, store, id));
+    appendSyncLog(`fbDel OK: ${store}/${id}`);
   } catch (e) { console.warn("Firebase delete failed:", e.message); }
 }
 
@@ -146,7 +173,9 @@ async function fbGetAll(store) {
   try {
     const { db, collection, getDocs } = await loadFirebase(cfg);
     const snap = await getDocs(collection(db, store));
-    return snap.docs.map(d => d.data());
+    const docs = snap.docs.map(d => d.data());
+    appendSyncLog(`fbGetAll: ${store} => ${docs.length} docs`);
+    return docs;
   } catch (e) { console.warn("Firebase read failed:", e.message); return null; }
 }
 
@@ -357,15 +386,20 @@ function useStore() {
 
   // Write to local + Firebase
   const update = useCallback(async (store, item) => {
+    // Ensure timestamps for LWW conflict resolution
+    const now = new Date().toISOString();
+    if (!item.createdAt) item.createdAt = now;
+    item.updatedAt = now;
     await dbPut(store, item);
     setState(s => ({ ...s, [store]: s[store].find(x=>x.id===item.id) ? s[store].map(x=>x.id===item.id?item:x) : [...s[store], item] }));
     await fbPut(store, item);
   }, []);
 
   const remove = useCallback(async (store, id) => {
+    // Delete locally and in cloud
     await dbDel(store, id);
     setState(s => ({ ...s, [store]: s[store].filter(x=>x.id!==id) }));
-    await fbDel(store, id);
+    try { await fbDel(store, id); } catch(e) { console.warn("fbDel failed:", e); }
   }, []);
 
   const audit = useCallback(async (action, detail, user) => {
@@ -397,25 +431,53 @@ async function syncFromFirebase(localState, setState, setSyncStatus, unsubRefs) 
       const cloudData = await fbGetAll(store);
       if (!cloudData) return;
 
-      // Merge cloud into local IndexedDB
-      for (const item of cloudData) await dbPut(store, item);
+      // Merge cloud into local IndexedDB using LWW (updatedAt)
+      for (const item of cloudData) {
+        try {
+          const local = await dbGet(store, item.id);
+          const localTs = local?.updatedAt;
+          const cloudTs = item?.updatedAt;
+          // Apply if cloud has no ts (assume authoritative) or cloud is newer
+          if (!localTs || !cloudTs || cloudTs >= localTs) {
+            await dbPut(store, item);
+          }
+        } catch(e) { console.warn(`db merge ${store}/${item.id} failed:`, e); }
+      }
 
-      // Merge cloud items into state (cloud wins for conflict)
+      // Merge cloud items into state (LWW)
       setState(s => {
         const local = s[store] || [];
         const merged = [...local];
         for (const ci of cloudData) {
           const idx = merged.findIndex(x => x.id === ci.id);
-          if (idx >= 0) merged[idx] = ci; else merged.push(ci);
+          if (idx >= 0) {
+            const localItem = merged[idx];
+            if (!localItem.updatedAt || !ci.updatedAt || ci.updatedAt >= localItem.updatedAt) merged[idx] = ci;
+          } else merged.push(ci);
         }
         return { ...s, [store]: merged };
       });
 
-      // Set up real-time listener
+      // Set up real-time listener with safe merge
       const unsub = onSnapshot(collection(db, store), snap => {
         const items = snap.docs.map(d => d.data());
-        setState(s => ({ ...s, [store]: items }));
-        items.forEach(item => dbPut(store, item));
+        // For each item, apply if cloud is newer
+        items.forEach(async item => {
+          try {
+            const local = await dbGet(store, item.id);
+            const localTs = local?.updatedAt;
+            const cloudTs = item?.updatedAt;
+            if (!localTs || !cloudTs || cloudTs >= localTs) {
+              await dbPut(store, item);
+              setState(s => {
+                const cur = s[store] || [];
+                const idx = cur.findIndex(x => x.id === item.id);
+                if (idx >= 0) { cur[idx] = item; return { ...s, [store]: [...cur] }; }
+                return { ...s, [store]: [...cur, item] };
+              });
+            }
+          } catch(e) { console.warn(`Listener merge ${store}/${item.id} failed:`, e); }
+        });
       }, err => console.warn(`Listener ${store}:`, err.message));
       unsubRefs.current.push(unsub);
     }));
@@ -2089,6 +2151,17 @@ function FirebaseSettingsPage({ state, toast, reload, syncStatus }) {
               </Card>
               <Card>
                 <h3 style={{ margin:"0 0 14px", fontSize:14, fontWeight:800, color:B.dark }}>Connection Info</h3>
+                <div style={{ marginTop:12 }}>
+                  <h4 style={{ margin:"0 0 8px", fontSize:13, fontWeight:800 }}>Sync Log</h4>
+                  <div style={{ maxHeight:160, overflow:"auto", fontSize:12, background:B.gray, padding:8, borderRadius:8 }}>
+                    {readSyncLog().slice().reverse().map((l,i)=>(
+                      <div key={i} style={{ padding:"6px 8px", borderBottom:`1px dashed ${B.border}`, color:B.text }}>
+                        <div style={{ fontSize:11,color:B.muted }}>{l.ts}</div>
+                        <div style={{ fontSize:13,fontWeight:700 }}>{l.entry}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 <div style={{ fontSize:13, lineHeight:2, color:B.text }}>
                   {existing && Object.entries(existing).map(([k,v])=>(
                     <div key={k} style={{ display:"flex", justifyContent:"space-between", borderBottom:`1px solid ${B.gray}`, padding:"4px 0" }}>
